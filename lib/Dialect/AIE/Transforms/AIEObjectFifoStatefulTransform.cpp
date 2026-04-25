@@ -906,15 +906,29 @@ struct AIEObjectFifoStatefulTransformPass
                                    channelDir);
   }
 
-  /// Helper for G-T3.2-001: read the IRON SparseFifo discardable attrs
-  /// (set by ``aie.iron.sparse.SparseFifo.resolve``) from the originating
-  /// ObjectFifoCreateOp and, if the channel direction selects the matching
-  /// half of the (compress_mm2s, decompress_s2mm) pair, attach a discardable
-  /// boolean ``aie.enable_compression = true`` attribute on the new DMABDOp.
-  /// This is the cross-pass plumbing that closes G-T3.2-001 (T3.2's partial
-  /// fallback verdict): the SparseFifo lowering already attaches the intent
-  /// to the ObjectFifoCreateOp; this propagates it to the DMABDOp where the
-  /// ObjectFifoCreateOp itself is about to be erased.
+  /// Helper for G-T3.2-001 / G-T3.2-006: read the IRON SparseFifo
+  /// discardable attrs (set by ``aie.iron.sparse.SparseFifo.resolve``)
+  /// from the originating ObjectFifoCreateOp and, if the channel
+  /// direction selects the matching half of the
+  /// (compress_mm2s, decompress_s2mm) pair AND the BD lives on a
+  /// compute (AIE) tile, attach a discardable boolean
+  /// ``aie.enable_compression = true`` attribute on the new DMABDOp.
+  /// This is the cross-pass plumbing that closes G-T3.2-001 (the
+  /// producer-side half) and G-T3.2-006 (the consumer-side half +
+  /// the cross-module footgun guard): the SparseFifo lowering
+  /// already attaches the intent to the ObjectFifoCreateOp; this
+  /// propagates it to the DMABDOp where the ObjectFifoCreateOp
+  /// itself is about to be erased.
+  ///
+  /// Cross-module footgun (AM029 / aie_registers_aie2.json):
+  ///   * Compute-tile MEMORY_MODULE DMA_BD0_1 bit 31 = Enable_Compression
+  ///   * Memory-tile MEMORY_TILE_MODULE DMA_BD0_1 bits 31:26 = D0_Pad_Before
+  ///   * Shim DMA: AM029 documents Enable_Compression for "AIE-ML
+  ///     memory and AIE-ML tile DMA" only — not for shim.
+  /// Setting aie.enable_compression on a memtile or shim BD would
+  /// either silently corrupt an unrelated field (memtile) or set an
+  /// undocumented bit (shim). So we walk up to the BD's owning tile
+  /// and bail out unless it's a compute tile.
   static void propagateSparseCompressionAttr(Operation *bdOp, Operation *fifoOp,
                                              DMAChannelDir channelDir) {
     if (!bdOp || !fifoOp)
@@ -930,6 +944,30 @@ struct AIEObjectFifoStatefulTransformPass
     auto enable = fifoOp->getAttrOfType<BoolAttr>(attrName);
     if (!enable || !enable.getValue())
       return;
+
+    // Cross-module footgun guard: only emit on compute-tile BDs. The
+    // BD lives in either MemOp (compute), MemTileDMAOp (memtile), or
+    // ShimDMAOp (shim). Walk up to find the parent and check the
+    // tile type via the device's target model.
+    TileOp tileOp;
+    if (auto memOp = bdOp->getParentOfType<MemOp>())
+      tileOp = memOp.getTileOp();
+    else if (bdOp->getParentOfType<MemTileDMAOp>() ||
+             bdOp->getParentOfType<ShimDMAOp>())
+      return; // memtile / shim — bit means something else (or undocumented).
+    else
+      return; // unknown parent; conservative skip.
+
+    if (!tileOp)
+      return;
+    auto deviceOp = tileOp->getParentOfType<DeviceOp>();
+    if (!deviceOp)
+      return;
+    const auto &targetModel = deviceOp.getTargetModel();
+    if (tileOp.isShimTile() ||
+        targetModel.isMemTile(tileOp.getCol(), tileOp.getRow()))
+      return;
+
     bdOp->setAttr("aie.enable_compression",
                   BoolAttr::get(bdOp->getContext(), true));
   }
@@ -1974,6 +2012,30 @@ struct AIEObjectFifoStatefulTransformPass
               builder.getI32IntegerAttr(*bdChainIterCount));
         }
         replaceSplitFifo(createOp, consumerFifo, consumerTileOp);
+
+        // G-T3.2-006: propagate IRON SparseFifo discardable attrs from
+        // the original createOp to the new consumerFifo. Without this,
+        // the consumer-side ObjectFifoCreateOp is attr-less and the
+        // downstream propagateSparseCompressionAttr (called from
+        // createBdBlock for each consumer-side BD) finds no
+        // ``aie.decompress_s2mm`` to read and silently emits no
+        // ``aie.enable_compression`` on consumer-side S2MM BDs. The
+        // original G-T3.2-001 fix only landed the producer-side half
+        // of this propagation; the lit test verified only the BD-emit
+        // pass's final hop given a hand-constructed
+        // NpuWriteBdOp{aie.enable_compression = true} and never drove
+        // the full pipeline through this split-fifo path. See
+        // tests/aie2p_microtests/dma_compression_loopback/ for the
+        // microtest that surfaced this gap.
+        for (StringRef attrName : {"aie.compress_mm2s",
+                                   "aie.decompress_s2mm",
+                                   "aie.sparsity_pattern",
+                                   "aie.sparsity_n",
+                                   "aie.sparsity_m"}) {
+          if (auto attr = createOp->getAttr(attrName))
+            consumerFifo->setAttr(attrName, attr);
+        }
+
         if (createOp.getAieStream()) {
           int streamEnd = createOp.getAieStream().value();
           if (streamEnd > 0) {
