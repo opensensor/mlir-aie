@@ -34,6 +34,7 @@ from .program import Program
 from .worker import Worker, WorkerRuntimeBarrier
 from .runtime import Runtime
 from .dataflow import ObjectFifo
+from .sparse import SparseFifo
 from .dtype import str_to_dtype, dtype_to_str
 from aie.utils.jit import jit
 from aie.utils import (
@@ -108,22 +109,6 @@ class AccumFifo:
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
             "AccumFifo: T2.3 not yet landed (T1.2 reservation slot)"
-        )
-
-
-class SparseFifo:
-    """T2.5 reservation slot -- on-the-fly N:M sparsity decompression on S2MM.
-
-    Producer accepts compressed weights; consumer receives dense data
-    transparently. Closes G-T5.1-005; makes T6.4-C compressed-weight LSTM
-    idiomatic.
-
-    Raises :class:`NotImplementedError` until T2.5 lands.
-    """
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "SparseFifo: T2.5 not yet landed (T1.2 reservation slot)"
         )
 
 
