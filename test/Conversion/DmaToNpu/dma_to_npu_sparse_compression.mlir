@@ -23,7 +23,7 @@
 //   Without compression: words[1] = (1<<30)|(21<<24)|(7<<19)|(5<<16)
 //                                 = 0x553D0000 = 1430061056
 //   With    compression: words[1] = (1<<31) | (above)
-//                                 = 0xD53D0000 = 3577544704
+//                                 = 0xD53D0000 = 3577544704 (= -717422592 as signed i32)
 //
 // The other five words are identical to the core-tile reference and
 // should match the dense baseline byte-for-byte.
@@ -31,7 +31,7 @@
 // RUN: aie-opt --aie-dma-to-npu %s | FileCheck %s
 
 // CHECK-LABEL: module
-// CHECK: memref.global "private" constant @blockwrite_data_0 : memref<6xi32> = dense<[1180485, 3577544704, 9093684, 266847009, 22249971, 1465218380]>
+// CHECK: memref.global "private" constant @blockwrite_data_0 : memref<6xi32> = dense<[1180485, -717422592, 9093684, 266847009, 22249971, 1465218380]>
 // CHECK: memref.global "private" constant @blockwrite_data_1 : memref<6xi32> = dense<[1180485, 1430061056, 9093684, 266847009, 22249971, 1465218380]>
 module {
   aie.device(npu1_1col) {
