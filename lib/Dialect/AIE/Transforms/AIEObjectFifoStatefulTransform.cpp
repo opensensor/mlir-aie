@@ -1403,8 +1403,30 @@ struct AIEObjectFifoStatefulTransformPass
           remainderMap[forLoop.getOperation()] = 0;
           for (auto acqOp : body->getOps<ObjectFifoAcquireOp>()) {
             if (acqOp.getOperation()->getParentOp() == forLoop) {
-              foundMap[forLoop.getOperation()] = true;
               ObjectFifoCreateOp op = acqOp.getObjectFifo();
+              // G-T3.2-007: VariableRateFifo opts out of LCM-based loop
+              // unrolling. The marker ``aie.variable_rate = true`` is
+              // pinned by IRON's
+              // ``aie.iron.variable_rate.VariableRateFifo.resolve()``
+              // and propagated through the split-fifo path (above).
+              // The producer's loop body for a variable-rate fifo
+              // contains a conditional acquire/release (the "skip this
+              // window" semantic) that the LCM-unroll math cannot model.
+              // The runtime-counter machinery (dynamicGlobalObjectFifos /
+              // updateGlobalNextIndex) handles asymmetric rates
+              // correctly without unrolling.
+              //
+              // We still set foundMap=true if the loop has ANY non-
+              // variable-rate fifo accesses (so the LCM-unroll runs
+              // against those). If the only accesses in this loop are
+              // on variable-rate fifos, foundMap stays false and the
+              // loop is left alone (treated like a loop that has no
+              // objectfifo accesses).
+              auto vrAttr = op->getAttrOfType<BoolAttr>("aie.variable_rate");
+              if (vrAttr && vrAttr.getValue()) {
+                continue;
+              }
+              foundMap[forLoop.getOperation()] = true;
               objFifoSizes.insert(op.size());
             }
           }
@@ -2031,7 +2053,20 @@ struct AIEObjectFifoStatefulTransformPass
                                    "aie.decompress_s2mm",
                                    "aie.sparsity_pattern",
                                    "aie.sparsity_n",
-                                   "aie.sparsity_m"}) {
+                                   "aie.sparsity_m",
+                                   // G-T3.2-007: VariableRateFifo marker.
+                                   // Pinned by IRON
+                                   // ``aie.iron.variable_rate.VariableRateFifo``;
+                                   // read by ``unrollForLoops`` (below) to
+                                   // exclude the fifo from LCM-based loop
+                                   // unrolling, and by diagnostic dumps to
+                                   // surface "this fifo's producer skips
+                                   // slots conditionally". Mirrors the
+                                   // SparseFifo discardable-attr propagation
+                                   // through the split-fifo path so
+                                   // consumer-side fifos also carry the
+                                   // marker.
+                                   "aie.variable_rate"}) {
           if (auto attr = createOp->getAttr(attrName))
             consumerFifo->setAttr(attrName, attr);
         }
